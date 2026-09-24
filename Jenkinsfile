@@ -1,5 +1,28 @@
 pipeline {
-    agent any
+    agent {
+        kubernetes {
+            yaml '''
+            apiVersion: v1
+            kind: Pod
+            spec:
+              # This ensures the pod uses Workload Identity to authenticate with GCP automatically
+              serviceAccountName: jenkins-sa
+              containers:
+              - name: kaniko
+                image: gcr.io/kaniko-project/executor:debug
+                command:
+                - sleep
+                args:
+                - 9999999
+              - name: cloud-sdk
+                image: google/cloud-sdk:latest
+                command:
+                - sleep
+                args:
+                - 9999999
+            '''
+        }
+    }
 
     environment {
         // GCP & GKE Configuration
@@ -22,56 +45,44 @@ pipeline {
             }
         }
 
-        stage('Configure Docker Auth') {
+        stage('Build & Push Image (Kaniko)') {
             steps {
-                sh '''
-                    # Workload Identity automatically handles gcloud authentication
-                    gcloud auth configure-docker ${REGISTRY_HOST} --quiet
-                '''
-            }
-        }
-
-        stage('Build Docker Image') {
-            steps {
-                sh '''
-                    echo "Building Docker Image: ${FULL_IMAGE_NAME}:${IMAGE_TAG}"
-                    docker build -t ${FULL_IMAGE_NAME}:${IMAGE_TAG} -t ${FULL_IMAGE_NAME}:latest .
-                '''
-            }
-        }
-
-        stage('Push Image to Artifact Registry') {
-            steps {
-                sh '''
-                    echo "Pushing image to GCP Artifact Registry..."
-                    docker push ${FULL_IMAGE_NAME}:${IMAGE_TAG}
-                    docker push ${FULL_IMAGE_NAME}:latest
-                '''
+                // Execute this step inside the Kaniko container
+                container('kaniko') {
+                    sh '''
+                        # Kaniko builds and pushes the image in a single command
+                        # Workload Identity handles the Artifact Registry authentication automatically
+                        /kaniko/executor --context `pwd` --destination ${FULL_IMAGE_NAME}:${IMAGE_TAG} --destination${FULL_IMAGE_NAME}:latest
+                    '''
+                }
             }
         }
 
         stage('Deploy to Autopilot GKE Cluster') {
             steps {
-                sh '''
-                    # Connect to GKE Autopilot Cluster using Workload Identity
-                    gcloud container clusters get-credentials ${GKE_CLUSTER_NAME} --location=${GCP_REGION} --project=${GCP_PROJECT_ID}
-                    
-                    # Substitute image path in deployment manifest
-                    sed -i "s|LOCATION-docker.pkg.dev/PROJECT_ID/REPOSITORY/IMAGE_NAME:TAG|${FULL_IMAGE_NAME}:${IMAGE_TAG}|g" k8s/deployment.yaml
-                    
-                    # Apply Kubernetes configuration
-                    kubectl apply -f k8s/deployment.yaml
-                    
-                    # Verify rollout status
-                    kubectl rollout status deployment/python-hello-world --timeout=180s
-                '''
+                // Execute this step inside the Cloud SDK container
+                container('cloud-sdk') {
+                    sh '''
+                        # Connect to GKE Autopilot Cluster
+                        gcloud container clusters get-credentials ${GKE_CLUSTER_NAME} --location=${GCP_REGION} --project=${GCP_PROJECT_ID}
+                        
+                        # Substitute image path in deployment manifest
+                        sed -i "s|LOCATION-docker.pkg.dev/PROJECT_ID/REPOSITORY/IMAGE_NAME:TAG|${FULL_IMAGE_NAME}:${IMAGE_TAG}|g" k8s/deployment.yaml
+                        
+                        # Apply Kubernetes configuration
+                        kubectl apply -f k8s/deployment.yaml
+                        
+                        # Verify rollout status
+                        kubectl rollout status deployment/python-hello-world --timeout=180s
+                    '''
+                }
             }
         }
     }
 
     post {
         success {
-            echo "Successfully deployed build #${BUILD_NUMBER} to ${GKE_CLUSTER_NAME}!"
+            echo "Successfully deployed build #${BUILD_NUMBER} to${GKE_CLUSTER_NAME}!"
         }
         failure {
             echo "Pipeline failed on build #${BUILD_NUMBER}. Please check logs."
