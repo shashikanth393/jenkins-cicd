@@ -2,17 +2,14 @@ pipeline {
     agent any
 
     environment {
-        // GCP Details (Auto-configured from your Cloud Shell prompt)
+        // GCP & GKE Configuration
         GCP_PROJECT_ID         = 'my-project-2-508107'
         GKE_CLUSTER_NAME       = 'autopilot-cluster-1'
-        GCP_REGION             = 'us-central1'             // Update if your cluster is in a different region (e.g. us-east1, asia-east1)
-        ARTIFACT_REGISTRY_REPO = 'my-python-repo'         // Replace with your Artifact Registry repository name
+        GCP_REGION             = 'us-central1'
+        ARTIFACT_REGISTRY_REPO = 'my-python-repo'
         IMAGE_NAME             = 'hello-world-python'
         
-        // Jenkins Credentials ID where your GCP Service Account JSON Key is stored
-        GCP_CREDENTIALS_ID     = 'gcp-service-account-key'
-        
-        // Dynamic Registry Variables
+        // Derived Image Path
         REGISTRY_HOST          = "${GCP_REGION}-docker.pkg.dev"
         FULL_IMAGE_NAME        = "${REGISTRY_HOST}/${GCP_PROJECT_ID}/${ARTIFACT_REGISTRY_REPO}/${IMAGE_NAME}"
         IMAGE_TAG              = "${BUILD_NUMBER}"
@@ -25,18 +22,12 @@ pipeline {
             }
         }
 
-        stage('Authenticate GCP & Docker') {
+        stage('Configure Docker Auth') {
             steps {
-                withCredentials([file(credentialsId: env.GCP_CREDENTIALS_ID, variable: 'GCP_KEY_FILE')]) {
-                    sh '''
-                        # Authenticate gcloud CLI
-                        gcloud auth activate-service-account --key-file="${GCP_KEY_FILE}"
-                        gcloud config set project ${GCP_PROJECT_ID}
-                        
-                        # Authenticate Docker for Artifact Registry
-                        gcloud auth configure-docker ${REGISTRY_HOST} --quiet
-                    '''
-                }
+                sh '''
+                    # Workload Identity automatically handles gcloud authentication
+                    gcloud auth configure-docker ${REGISTRY_HOST} --quiet
+                '''
             }
         }
 
@@ -61,21 +52,19 @@ pipeline {
 
         stage('Deploy to Autopilot GKE Cluster') {
             steps {
-                withCredentials([file(credentialsId: env.GCP_CREDENTIALS_ID, variable: 'GCP_KEY_FILE')]) {
-                    sh '''
-                        # Connect to your GKE Autopilot Cluster
-                        gcloud container clusters get-credentials ${GKE_CLUSTER_NAME} --region=${GCP_REGION} --project=${GCP_PROJECT_ID}
-                        
-                        # Replace image placeholder in k8s/deployment.yaml with the newly built image tag
-                        sed -i "s|LOCATION-docker.pkg.dev/PROJECT_ID/REPOSITORY/IMAGE_NAME:TAG|${FULL_IMAGE_NAME}:${IMAGE_TAG}|g" k8s/deployment.yaml
-                        
-                        # Apply Kubernetes configuration
-                        kubectl apply -f k8s/deployment.yaml
-                        
-                        # Verify deployment roll-out status
-                        kubectl rollout status deployment/python-hello-world --timeout=180s
-                    '''
-                }
+                sh '''
+                    # Connect to GKE Autopilot Cluster using Workload Identity
+                    gcloud container clusters get-credentials ${GKE_CLUSTER_NAME} --location=${GCP_REGION} --project=${GCP_PROJECT_ID}
+                    
+                    # Substitute image path in deployment manifest
+                    sed -i "s|LOCATION-docker.pkg.dev/PROJECT_ID/REPOSITORY/IMAGE_NAME:TAG|${FULL_IMAGE_NAME}:${IMAGE_TAG}|g" k8s/deployment.yaml
+                    
+                    # Apply Kubernetes configuration
+                    kubectl apply -f k8s/deployment.yaml
+                    
+                    # Verify rollout status
+                    kubectl rollout status deployment/python-hello-world --timeout=180s
+                '''
             }
         }
     }
