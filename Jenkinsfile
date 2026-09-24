@@ -5,7 +5,6 @@ pipeline {
             apiVersion: v1
             kind: Pod
             spec:
-              # This ensures the pod uses Workload Identity to authenticate with GCP automatically
               serviceAccountName: jenkins-sa
               containers:
               - name: kaniko
@@ -47,12 +46,11 @@ pipeline {
 
         stage('Build & Push Image (Kaniko)') {
             steps {
-                // Execute this step inside the Kaniko container
                 container('kaniko') {
                     sh '''
-                        # Kaniko builds and pushes the image in a single command
-                        # Workload Identity handles the Artifact Registry authentication automatically
-                        /kaniko/executor --context `pwd` --destination ${FULL_IMAGE_NAME}:${IMAGE_TAG} --destination${FULL_IMAGE_NAME}:latest
+                        /kaniko/executor --context `pwd` \
+                            --destination ${FULL_IMAGE_NAME}:${IMAGE_TAG} \
+                            --destination ${FULL_IMAGE_NAME}:latest
                     '''
                 }
             }
@@ -60,7 +58,6 @@ pipeline {
 
         stage('Deploy to Autopilot GKE Cluster') {
             steps {
-                // Execute this step inside the Cloud SDK container
                 container('cloud-sdk') {
                     sh '''
                         # Connect to GKE Autopilot Cluster
